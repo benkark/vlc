@@ -37,7 +37,7 @@ void input_item_SetArtFetched( input_item_t *p_i, bool b_art_fetched );
 void input_item_SetEpg( input_item_t *p_item, const vlc_epg_t *p_epg );
 void input_item_SetEpgOffline( input_item_t * );
 
-int input_Preparse( vlc_object_t *, input_item_t * );
+input_thread_t *input_CreatePreparse( vlc_object_t *, input_item_t * );
 
 /* misc/stats.c
  * FIXME it should NOT be defined here or not coded in misc/stats.c */

@@ -59,6 +59,7 @@
  * Local prototypes
  *****************************************************************************/
 static  void *Run            ( void * );
+static  void *Preparse       ( void * );
 
 static input_thread_t * Create  ( vlc_object_t *, input_item_t *,
                                   const char *, bool, input_resource_t * );
@@ -154,43 +155,6 @@ int input_Read( vlc_object_t *p_parent, input_item_t *p_item )
 }
 
 /**
- * Initialize an input and initialize it to preparse the item
- * This function is blocking. It will only accept parsing regular files.
- *
- * \param p_parent a vlc_object_t
- * \param p_item an input item
- * \return VLC_SUCCESS or an error
- */
-int input_Preparse( vlc_object_t *p_parent, input_item_t *p_item )
-{
-    input_thread_t *p_input;
-
-    /* Allocate descriptor */
-    p_input = Create( p_parent, p_item, NULL, true, NULL );
-    if( !p_input )
-        return VLC_EGENERIC;
-
-    if( !Init( p_input ) ) {
-        /* if the demux is a playlist, call Mainloop that will call
-         * demux_Demux in order to fetch sub items */
-        bool b_is_playlist = false;
-
-        if ( input_item_ShouldPreparseSubItems( p_item )
-          && demux_Control( p_input->p->input.p_demux,
-                            DEMUX_IS_PLAYLIST,
-                            &b_is_playlist ) )
-            b_is_playlist = false;
-        if( b_is_playlist )
-            MainLoop( p_input, false );
-        End( p_input );
-    }
-
-    vlc_object_release( p_input );
-
-    return VLC_SUCCESS;
-}
-
-/**
  * Start a input_thread_t created by input_Create.
  *
  * You must not start an already running input_thread_t.
@@ -210,6 +174,36 @@ int input_Start( input_thread_t *p_input )
         return VLC_EGENERIC;
     }
     return VLC_SUCCESS;
+}
+
+/**
+ * Initialize an input and initialize it to preparse the item.
+ *
+ * Preparsing is performed asynchronously; use input_Stop() to abort it, or
+ * wait until the input goes dead on its own. Use input_Close() to wait for
+ * completion and clean up.
+ *
+ * \param p_parent a vlc_object_t
+ * \param p_item an input item
+ * \return an input thread or NULL on error
+ */
+input_thread_t *input_CreatePreparse( vlc_object_t *p_parent,
+                                      input_item_t *p_item )
+{
+    input_thread_t *p_input = Create( p_parent, p_item, NULL, true, NULL );
+    if( unlikely(p_input == NULL) )
+        return NULL;
+
+    p_input->p->is_running = !vlc_clone( &p_input->p->thread, Preparse,
+                                         p_input, VLC_THREAD_PRIORITY_INPUT );
+    if( !p_input->p->is_running )
+    {
+        input_ChangeState( p_input, ERROR_S );
+        msg_Err( p_input, "cannot create input thread" );
+        input_Close( p_input );
+        p_input = NULL;
+    }
+    return p_input;
 }
 
 /**
@@ -503,11 +497,13 @@ static input_thread_t *Create( vlc_object_t *p_parent, input_item_t *p_item,
     return p_input;
 }
 
-/*****************************************************************************
- * Run: main thread loop
- * This is the "normal" thread that spawns the input processing chain,
- * reads the stream, cleans up and waits
- *****************************************************************************/
+/**
+ * Normal input thread entry point.
+ *
+ * This is the "normal" thread. It spawns the input stream and elementary
+ * stream output, proceeds until the end of the stream is reached, then
+ * cleans up.
+ */
 static void *Run( void *obj )
 {
     input_thread_t *p_input = (input_thread_t *)obj;
@@ -522,7 +518,31 @@ static void *Run( void *obj )
     }
 
     input_SendEventDead( p_input );
+    vlc_restorecancel( canc );
+    return NULL;
+}
 
+static void *Preparse( void *obj )
+{
+    input_thread_t *p_input = (input_thread_t *)obj;
+    const int canc = vlc_savecancel();
+
+    if( !Init( p_input ) )
+    {   /* If the demux is a playlist, call Mainloop(). It will call
+         * demux_Demux() in order to fetch the sub-items. */
+        bool b_is_playlist = false;
+
+        if ( input_item_ShouldPreparseSubItems( p_input->p->p_item )
+          && demux_Control( p_input->p->input.p_demux,
+                            DEMUX_IS_PLAYLIST,
+                            &b_is_playlist ) )
+            b_is_playlist = false;
+        if( b_is_playlist )
+            MainLoop( p_input, false );
+        End( p_input );
+    }
+
+    input_SendEventDead( p_input );
     vlc_restorecancel( canc );
     return NULL;
 }
